@@ -21,12 +21,12 @@ import com.google.common.collect.ImmutableMap;
 import io.cdap.cdap.api.annotation.Description;
 import io.cdap.cdap.api.annotation.Macro;
 import io.cdap.cdap.api.annotation.Name;
-import io.cdap.cdap.api.annotation.Plugin;
+import io.cdap.cdap.api.annotation.Plugin; //
 import io.cdap.cdap.api.data.format.StructuredRecord;
 import io.cdap.cdap.api.data.schema.Schema;
 import io.cdap.cdap.api.metrics.Metrics;
-import io.cdap.cdap.api.plugin.PluginConfig;
-import io.cdap.cdap.api.plugin.PluginProperties;
+import io.cdap.cdap.api.plugin.PluginConfig; //
+import io.cdap.cdap.api.plugin.PluginProperties; //
 import io.cdap.cdap.etl.api.Emitter;
 import io.cdap.cdap.etl.api.FailureCollector;
 import io.cdap.cdap.etl.api.InvalidEntry;
@@ -67,6 +67,7 @@ import io.cdap.wrangler.parser.MigrateToV2;
 import io.cdap.wrangler.parser.NoOpDirectiveContext;
 import io.cdap.wrangler.parser.RecipeCompiler;
 import io.cdap.wrangler.proto.Contexts;
+import io.cdap.wrangler.proto.workspace.v2.Workspace.UserDefinedAction;
 import io.cdap.wrangler.registry.CompositeDirectiveRegistry;
 import io.cdap.wrangler.registry.DirectiveInfo;
 import io.cdap.wrangler.registry.DirectiveRegistry;
@@ -80,6 +81,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -175,7 +177,6 @@ public class Wrangler extends Transform<StructuredRecord, StructuredRecord> impl
         || config.getField().equals("#"))) {
         validateInputSchema(iSchema, collector);
       }
-
       String directives = config.getDirectives();
       if (config.getUDDs() != null && !config.getUDDs().trim().isEmpty()) {
         if (config.containsMacro("directives")) {
@@ -365,7 +366,30 @@ public class Wrangler extends Transform<StructuredRecord, StructuredRecord> impl
 
     try {
       // Create the pipeline executor with context being set.
-      pipeline = new RecipePipelineExecutor(recipe, ctx);
+      HashMap<String, UserDefinedAction> columnMappings = config.getColumnMappings();
+//      String nonNullableColumnsString = config.getNonNullableColumns();
+//      UserDefinedAction userDefinedAction = UserDefinedAction.NULLABLE;
+//      String userDefinedActionString =  config.getUserDefinedAction();
+//      switch(userDefinedActionString) {
+//        case "NULLABLE":
+//          break;
+//        case "NO_ACTION":
+//          userDefinedAction = UserDefinedAction.NO_ACTION;
+//          break;
+//        case "SKIP_ROW":
+//          userDefinedAction = UserDefinedAction.SKIP_ROW;
+//          break;
+//        case "SEND_TO_ERROR_COLLECTOR":
+//          userDefinedAction = UserDefinedAction.SEND_TO_ERROR_COLLECTOR;
+//          break;
+//        case "ERROR_PIPELINE":
+//          userDefinedAction = UserDefinedAction.ERROR_PIPELINE;
+//          break;
+//      }
+//      HashSet<String> nonNullableCols = new HashSet<>();
+//      nonNullableCols.add("latitude"); //MINU::hardcoded right now.
+
+      pipeline = new RecipePipelineExecutor(recipe, ctx, columnMappings);
     } catch (Exception e) {
       throw new Exception(String.format("Stage:%s - %s", getContext().getStageName(), e.getMessage()), e);
     }
@@ -637,6 +661,7 @@ public class Wrangler extends Transform<StructuredRecord, StructuredRecord> impl
    * Config for the plugin.
    */
   public static class Config extends PluginConfig {
+    //MINU:: Can we add the userDefinedAction and non nullable column hashset over here?
     static final String NAME_PRECONDITION = "precondition";
     static final String NAME_PRECONDITION_SQL = "preconditionSQL";
     static final String NAME_PRECONDITION_LANGUAGE = "expressionLanguage";
@@ -645,6 +670,7 @@ public class Wrangler extends Transform<StructuredRecord, StructuredRecord> impl
     static final String NAME_UDD = "udd";
     static final String NAME_SCHEMA = "schema";
     static final String NAME_ON_ERROR = "on-error";
+    public static final String COLUMN_MAPPINGS = "columnMappings";
 
     @Name(NAME_PRECONDITION_LANGUAGE)
     @Description("Toggle to configure precondition language between JEXL and SQL")
@@ -693,8 +719,15 @@ public class Wrangler extends Transform<StructuredRecord, StructuredRecord> impl
     @Nullable
     private final String onError;
 
+    @Name(COLUMN_MAPPINGS)
+    @Description("Mappings from record field to Bigtable column name. " +
+        "Column names must be formatted as <family>:<qualifier>.")
+    @Macro
+    private final String columnMappings;
+
     public Config(String preconditionLanguage, String precondition, String directives, String udds,
-                  String field, String schema, String onError) {
+                  String field, String schema, String onError, String nonNullableColumns,
+        String userDefinedAction, String columnMappings) {
       this.preconditionLanguage = preconditionLanguage;
       this.precondition = precondition;
       this.directives = directives;
@@ -703,7 +736,15 @@ public class Wrangler extends Transform<StructuredRecord, StructuredRecord> impl
       this.field = field;
       this.schema = schema;
       this.onError = onError;
+      this.columnMappings = columnMappings;
     }
+
+    public HashMap<String, UserDefinedAction> getColumnMappings() { //
+      HashMap<String, UserDefinedAction> specifiedMappings = Strings.isNullOrEmpty(columnMappings) ?
+          null : ConfigUtil.parseKeyValueConfig(columnMappings, ",", "=");
+      return specifiedMappings;
+    }
+
 
     /**
      * @return if on-error is not specified returns default, else value.
@@ -740,5 +781,67 @@ public class Wrangler extends Transform<StructuredRecord, StructuredRecord> impl
       return udds;
     }
   }
+  /**
+   * ConfigUtil class
+   */
+  public static class ConfigUtil {
+    public static final String NAME_CONNECTION = "connection";
+    public static final String NAME_USE_CONNECTION = "useConnection";
+
+    public static HashMap<String, UserDefinedAction> parseKeyValueConfig(String configValue, String delimiter,
+        String keyValueDelimiter) {
+      HashMap<String, UserDefinedAction> map = new HashMap<>();
+      for (String property : configValue.split(delimiter)) {
+        String[] parts = property.split(keyValueDelimiter);
+        String key = parts[0];
+        String value = parts[1];
+        UserDefinedAction userDefinedAction = UserDefinedAction.NULLABLE;
+        switch(value) {
+          case "NULLABLE":
+            break;
+          case "NO_ACTION":
+            userDefinedAction = UserDefinedAction.NO_ACTION;
+            break;
+          case "SKIP_ROW":
+            userDefinedAction = UserDefinedAction.SKIP_ROW;
+            break;
+          case "SEND_TO_ERROR_COLLECTOR":
+            userDefinedAction = UserDefinedAction.SEND_TO_ERROR_COLLECTOR;
+            break;
+          case "ERROR_PIPELINE":
+            userDefinedAction = UserDefinedAction.ERROR_PIPELINE;
+            break;
+        }
+        map.put(key, userDefinedAction);
+      }
+      return map;
+    }
+
+    public String getKVPair(String key, String value, String keyValueDelimiter) {
+      return String.format("%s%s%s", key, keyValueDelimiter, value);
+    }
+
+    public void validateConnection(PluginConfig config, Boolean useConnection, PluginConfig connection,
+        FailureCollector collector) {
+      Map<String, String> rawProperties = config.getRawProperties().getProperties();
+      // if use connection is false but connection is provided, fail the validation
+      if (useConnection != null && !useConnection && rawProperties.get(NAME_CONNECTION) != null) {
+        collector.addFailure(
+            String.format("Connection cannot be used when %s is set to false.", NAME_USE_CONNECTION),
+            String.format("Please set %s to true.", NAME_USE_CONNECTION)).withConfigProperty(NAME_USE_CONNECTION);
+      }
+      // if use connection is true but connection is not provided , fail the validation
+      if (useConnection != null && useConnection && rawProperties.get(NAME_CONNECTION) == null) {
+        collector.addFailure(
+            String.format(
+                "Property %s is not provided when %s is set to true.",
+                NAME_CONNECTION, NAME_USE_CONNECTION),
+            String.format(
+                "Please set a value with a Macro referencing an existing connection for property %s.", NAME_CONNECTION)
+        ).withConfigProperty(NAME_CONNECTION);
+      }
+    }
+  }
+
 }
 

@@ -25,8 +25,10 @@ import io.cdap.cdap.features.Feature;
 import io.cdap.directives.aggregates.DefaultTransientStore;
 import io.cdap.wrangler.api.CompileException;
 import io.cdap.wrangler.api.DirectiveConfig;
+import io.cdap.wrangler.api.DirectiveExecutionException;
 import io.cdap.wrangler.api.DirectiveParseException;
 import io.cdap.wrangler.api.ErrorRecordBase;
+import io.cdap.wrangler.api.ErrorRowException;
 import io.cdap.wrangler.api.ExecutorContext;
 import io.cdap.wrangler.api.GrammarMigrator;
 import io.cdap.wrangler.api.Pair;
@@ -46,6 +48,9 @@ import io.cdap.wrangler.proto.workspace.ColumnStatistics;
 import io.cdap.wrangler.proto.workspace.ColumnValidationResult;
 import io.cdap.wrangler.proto.workspace.WorkspaceValidationResult;
 import io.cdap.wrangler.proto.workspace.v2.DirectiveExecutionResponse;
+import io.cdap.wrangler.proto.workspace.v2.SampleSpec;
+import io.cdap.wrangler.proto.workspace.v2.Workspace;
+import io.cdap.wrangler.proto.workspace.v2.Workspace.UserDefinedAction;
 import io.cdap.wrangler.registry.CompositeDirectiveRegistry;
 import io.cdap.wrangler.registry.DirectiveRegistry;
 import io.cdap.wrangler.registry.SystemDirectiveRegistry;
@@ -118,7 +123,9 @@ public class AbstractDirectiveHandler extends AbstractWranglerHandler {
       String namespace,
       List<String> directives,
       List<Row> sample,
-      GrammarWalker.Visitor<E> grammarVisitor) throws DirectiveParseException, E, RecipeException {
+      GrammarWalker.Visitor<E> grammarVisitor,
+      HashMap<String, UserDefinedAction> columnMappings)
+      throws DirectiveParseException, E, RecipeException, ErrorRowException, DirectiveExecutionException {
 
     if (directives.isEmpty()) {
       return sample;
@@ -139,8 +146,11 @@ public class AbstractDirectiveHandler extends AbstractWranglerHandler {
                                                  new ConfigDirectiveContext(DirectiveConfig.EMPTY));
     try (RecipePipelineExecutor executor = new RecipePipelineExecutor(parser,
                                                                       new ServicePipelineContext(
-                                                                        namespace, ExecutorContext.Environment.SERVICE,
-                                                                        getContext(), TRANSIENT_STORE))) {
+                                                                        namespace,
+                                                                          ExecutorContext.Environment.SERVICE,
+                                                                          getContext(),
+                                                                          TRANSIENT_STORE),
+        columnMappings)) {
       List<Row> result = executor.execute(sample);
 
       List<ErrorRecordBase> errors = executor.errors()
@@ -281,4 +291,25 @@ public class AbstractDirectiveHandler extends AbstractWranglerHandler {
     type = type.substring(0, 1).toUpperCase() + type.substring(1).toLowerCase();
     return type;
   }
+
+//  public Row nullHandler (Row inputRow, String columnName) {
+//    Schema currentSchema = TRANSIENT_STORE.get(TransientStoreKeys.OUTPUT_SCHEMA) != null ?
+//        TRANSIENT_STORE.get(TransientStoreKeys.OUTPUT_SCHEMA)
+//        : TRANSIENT_STORE.get(TransientStoreKeys.INPUT_SCHEMA);
+//    UserDefinedAction userDefinedAction = currentSchema.getField(columnName).getUserDefinedAction();
+//    Row outputRow = inputRow;
+//
+//    switch (userDefinedAction) {
+//      case NO_ACTION:
+//        return outputRow;
+//
+//      case SKIP_ROW:
+//        return null; //check if the row is empty in the directive
+////      case SEND_TO_ERROR_COLLECTOR:
+////      case ERROR_PIPELINE:
+////      case NULLABLE:
+//    }
+//
+//    return inputRow;
+//  }
 }

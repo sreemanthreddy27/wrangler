@@ -30,6 +30,7 @@ import io.cdap.wrangler.api.RecipePipeline;
 import io.cdap.wrangler.api.ReportErrorAndProceed;
 import io.cdap.wrangler.api.Row;
 import io.cdap.wrangler.api.TransientVariableScope;
+import io.cdap.wrangler.proto.workspace.v2.Workspace.UserDefinedAction;
 import io.cdap.wrangler.schema.DirectiveOutputSchemaGenerator;
 import io.cdap.wrangler.schema.DirectiveSchemaResolutionContext;
 import io.cdap.wrangler.schema.TransientStoreKeys;
@@ -40,6 +41,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import javax.annotation.Nullable;
 
@@ -56,14 +59,18 @@ public final class RecipePipelineExecutor implements RecipePipeline<Row, Structu
   private final RecipeParser recipeParser;
   private final ExecutorContext context;
   private List<Directive> directives;
+  private HashMap<String, UserDefinedAction> columnMappings;
 
-  public RecipePipelineExecutor(RecipeParser recipeParser, @Nullable ExecutorContext context) {
+  public RecipePipelineExecutor(RecipeParser recipeParser, @Nullable ExecutorContext context,
+      HashMap<String, UserDefinedAction> columnMappings) {
     this.context = context;
     this.recipeParser = recipeParser;
+    this.columnMappings = columnMappings;
   }
 
   /**
-   * Invokes each directives destroy method to perform any cleanup required by each individual directive.
+   * Invokes each directives destroy method to perform any cleanup required by each individual
+   * directive.
    */
   @Override
   public void close() {
@@ -82,7 +89,7 @@ public final class RecipePipelineExecutor implements RecipePipeline<Row, Structu
   /**
    * Executes the pipeline on the input.
    *
-   * @param rows List of Input record of type I.
+   * @param rows   List of Input record of type I.
    * @param schema Schema to which the output should be mapped.
    * @return Parsed output list of record of type O
    */
@@ -90,8 +97,9 @@ public final class RecipePipelineExecutor implements RecipePipeline<Row, Structu
   public List<StructuredRecord> execute(List<Row> rows, Schema schema) throws RecipeException {
     try {
       return convertor.toStructureRecord(execute(rows), schema);
-    } catch (RecordConvertorException e) {
-      throw new RecipeException("Problem converting into output record. Reason : " + e.getMessage(), e);
+    } catch (RecordConvertorException | ErrorRowException | DirectiveExecutionException e) {
+      throw new RecipeException("Problem converting into output record. Reason : " + e.getMessage(),
+          e);
     }
   }
 
@@ -102,16 +110,18 @@ public final class RecipePipelineExecutor implements RecipePipeline<Row, Structu
    * @return Parsed output list of record of type I
    */
   @Override
-  public List<Row> execute(List<Row> rows) throws RecipeException {
+  public List<Row> execute(List<Row> rows)
+      throws RecipeException, ErrorRowException, DirectiveExecutionException {
     List<Directive> directives = getDirectives();
     List<String> messages = new ArrayList<>();
     List<Row> results = new ArrayList<>();
+    //initialize the NullHandlingLayer
     int i = 0;
     int directiveIndex = 0;
     // Initialize schema with input schema from TransientStore if running in service env (design-time) / testing env
     boolean schemaManagementEnabled = context != null && context.isSchemaManagementEnabled();
     Schema inputSchema = schemaManagementEnabled ?
-      context.getTransientStore().get(TransientStoreKeys.INPUT_SCHEMA) : null;
+        context.getTransientStore().get(TransientStoreKeys.INPUT_SCHEMA) : null;
 
     List<DirectiveOutputSchemaGenerator> outputSchemaGenerators = new ArrayList<>();
     if (schemaManagementEnabled && inputSchema != null) {
@@ -120,8 +130,10 @@ public final class RecipePipelineExecutor implements RecipePipeline<Row, Structu
       }
     }
 
+
     try {
       collector.reset();
+      rows = nullChecker(rows);
       while (i < rows.size()) {
         messages.clear();
         // Resets the scope of local variable.
@@ -139,13 +151,16 @@ public final class RecipePipelineExecutor implements RecipePipeline<Row, Structu
               if (cumulativeRows.size() < 1) {
                 break;
               }
+              //go through the cumilative rows and check for null in non nullable column
+                cumulativeRows = nullChecker(cumulativeRows);
               if (schemaManagementEnabled && inputSchema != null) {
                 outputSchemaGenerators.get(directiveIndex - 1).addNewOutputFields(cumulativeRows);
               }
             } catch (ReportErrorAndProceed e) {
               messages.add(String.format("%s (ecode: %d)", e.getMessage(), e.getCode()));
               collector
-                .add(new ErrorRecord(rows.subList(i, i + 1).get(0), String.join(",", messages), e.getCode(), true));
+                  .add(new ErrorRecord(rows.subList(i, i + 1).get(0), String.join(",", messages),
+                      e.getCode(), true));
               cumulativeRows = new ArrayList<>();
               break;
             }
@@ -154,8 +169,9 @@ public final class RecipePipelineExecutor implements RecipePipeline<Row, Structu
         } catch (ErrorRowException e) {
           messages.add(String.format("%s", e.getMessage()));
           collector
-            .add(new ErrorRecord(rows.subList(i, i + 1).get(0), String.join(",", messages), e.getCode(),
-              e.isShownInWrangler()));
+              .add(new ErrorRecord(rows.subList(i, i + 1).get(0), String.join(",", messages),
+                  e.getCode(),
+                  e.isShownInWrangler()));
         }
         ++i;
       }
@@ -164,8 +180,9 @@ public final class RecipePipelineExecutor implements RecipePipeline<Row, Structu
     }
     // Schema generation
     if (schemaManagementEnabled && inputSchema != null) {
-      context.getTransientStore().set(TransientVariableScope.GLOBAL, TransientStoreKeys.OUTPUT_SCHEMA,
-                                        getOutputSchema(inputSchema, outputSchemaGenerators));
+      context.getTransientStore()
+          .set(TransientVariableScope.GLOBAL, TransientStoreKeys.OUTPUT_SCHEMA,
+              getOutputSchema(inputSchema, outputSchemaGenerators));
     }
     return results;
   }
@@ -187,16 +204,65 @@ public final class RecipePipelineExecutor implements RecipePipeline<Row, Structu
     return directives;
   }
 
-  private Schema getOutputSchema(Schema inputSchema, List<DirectiveOutputSchemaGenerator> outputSchemaGenerators)
-    throws RecipeException {
+  private Schema getOutputSchema(Schema inputSchema,
+      List<DirectiveOutputSchemaGenerator> outputSchemaGenerators)
+      throws RecipeException {
     Schema schema = inputSchema;
     for (DirectiveOutputSchemaGenerator outputSchemaGenerator : outputSchemaGenerators) {
       try {
-        schema = outputSchemaGenerator.getDirectiveOutputSchema(new DirectiveSchemaResolutionContext(schema));
+        schema = outputSchemaGenerator.getDirectiveOutputSchema(
+            new DirectiveSchemaResolutionContext(schema));
       } catch (RecordConvertorException e) {
         throw new RecipeException("Error while generating output schema for a directive: " + e, e);
       }
     }
     return schema;
+  }
+
+  public List<Row> nullChecker(List<Row> sample)
+      throws DirectiveExecutionException, ErrorRowException {
+    List<Row> result = new ArrayList<>();
+
+    for (Row row : sample) {
+      int elsecounts = 0;
+      boolean nullPresentinRow = false;
+
+      for (java.util.Map.Entry<String, UserDefinedAction> stringUserDefinedActionEntry : columnMappings.entrySet()) {
+        HashMap.Entry mapElement
+            = (HashMap.Entry) stringUserDefinedActionEntry;
+        String columnName = (String) mapElement.getKey();
+        UserDefinedAction userDefinedAction = (UserDefinedAction) mapElement.getValue();
+        Object value = row.getValue(columnName);
+        if (value == null) {
+          nullPresentinRow = true;
+          switch (userDefinedAction) {
+            case SKIP_ROW:
+              break;
+            case NULLABLE:
+              elsecounts++;
+              break;
+            case NO_ACTION:
+              elsecounts++;
+              break;
+            case ERROR_PIPELINE:
+              throw new DirectiveExecutionException(
+                  String.format("found null value in non nullable column %s", columnName));
+            case SEND_TO_ERROR_COLLECTOR:
+              throw new ErrorRowException("null error", "kadsjfklsdfj", 1);
+          }
+        } else {
+          elsecounts++;
+        }
+      }
+      if (nullPresentinRow) {
+        if (elsecounts == columnMappings.size()) {
+          result.add(row);
+        }
+      } else {
+        result.add(row);
+      }
+
+    }
+    return result;
   }
 }

@@ -100,6 +100,30 @@
           }
         }
       ]
+    },
+    {
+      "label": "Null Handling",
+      "properties": [
+        {
+          "widget-type": "keyvalue-dropdown",
+          "label": "Column Mappings",
+          "name": "columnMappings",
+          "widget-attributes": {
+            "showDelimiter": "false",
+            "kv-delimiter" : "=",
+            "delimiter" : ",",
+            "dropdownOptions": [
+              "NULLABLE",
+              "NO_ACTION",
+              "SKIP_ROW",
+              "SEND_TO_ERROR_COLLECTOR",
+              "ERROR_PIPELINE"
+              ],
+
+            "key-placeholder": "Field Name"
+          }
+        }
+      ]
     }
   ],
   "emit-alerts": true,

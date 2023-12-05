@@ -20,9 +20,11 @@ import io.cdap.cdap.api.data.schema.Schema;
 import io.cdap.wrangler.api.CompileException;
 import io.cdap.wrangler.api.CompileStatus;
 import io.cdap.wrangler.api.Compiler;
+import io.cdap.wrangler.api.DirectiveExecutionException;
 import io.cdap.wrangler.api.DirectiveLoadException;
 import io.cdap.wrangler.api.DirectiveNotFoundException;
 import io.cdap.wrangler.api.DirectiveParseException;
+import io.cdap.wrangler.api.ErrorRowException;
 import io.cdap.wrangler.api.ExecutorContext;
 import io.cdap.wrangler.api.GrammarMigrator;
 import io.cdap.wrangler.api.Pair;
@@ -62,7 +64,8 @@ public final class TestingRig {
    * @return {@link Schema} of output after transformation
    */
   public static Schema executeAndGetSchema(String[] recipe, List<Row> rows, Schema inputSchema)
-    throws DirectiveParseException, DirectiveLoadException, RecipeException {
+      throws DirectiveParseException, DirectiveLoadException,
+      RecipeException, ErrorRowException, DirectiveExecutionException {
     ExecutorContext context = new TestingPipelineContext().setSchemaManagementEnabled();
     context.getTransientStore().set(TransientVariableScope.GLOBAL, TransientStoreKeys.INPUT_SCHEMA, inputSchema);
     execute(recipe, rows, context);
@@ -77,19 +80,21 @@ public final class TestingRig {
    * @return transformed directives.
    */
   public static List<Row> execute(String[] recipe, List<Row> rows)
-    throws RecipeException, DirectiveParseException, DirectiveLoadException {
+      throws RecipeException, DirectiveParseException,
+      DirectiveLoadException, ErrorRowException, DirectiveExecutionException {
     return execute(recipe, rows, new TestingPipelineContext());
   }
 
   public static List<Row> execute(String[] recipe, List<Row> rows, ExecutorContext context)
-    throws RecipeException, DirectiveParseException, DirectiveLoadException {
+      throws RecipeException, DirectiveParseException,
+      DirectiveLoadException, ErrorRowException, DirectiveExecutionException {
     CompositeDirectiveRegistry registry = new CompositeDirectiveRegistry(
       SystemDirectiveRegistry.INSTANCE
     );
 
     String migrate = new MigrateToV2(recipe).migrate();
     RecipeParser parser = new GrammarBasedParser(Contexts.SYSTEM, migrate, registry);
-    return new RecipePipelineExecutor(parser, context).execute(rows);
+    return new RecipePipelineExecutor(parser, context, null).execute(rows);
   }
 
   /**
@@ -100,19 +105,20 @@ public final class TestingRig {
    * @return transformed directives and errors.
    */
   public static Pair<List<Row>, List<Row>> executeWithErrors(String[] recipe, List<Row> rows)
-    throws RecipeException, DirectiveParseException, DirectiveLoadException, DirectiveNotFoundException {
+      throws RecipeException, DirectiveParseException,
+      DirectiveLoadException, DirectiveNotFoundException, ErrorRowException, DirectiveExecutionException {
     return executeWithErrors(recipe, rows, new TestingPipelineContext());
   }
 
   public static Pair<List<Row>, List<Row>> executeWithErrors(String[] recipe, List<Row> rows, ExecutorContext context)
-    throws RecipeException, DirectiveParseException {
+      throws RecipeException, DirectiveParseException, ErrorRowException, DirectiveExecutionException {
     CompositeDirectiveRegistry registry = new CompositeDirectiveRegistry(
       SystemDirectiveRegistry.INSTANCE
     );
 
     String migrate = new MigrateToV2(recipe).migrate();
     RecipeParser parser = new GrammarBasedParser(Contexts.SYSTEM, migrate, registry);
-    RecipePipeline pipeline = new RecipePipelineExecutor(parser, context);
+    RecipePipeline pipeline = new RecipePipelineExecutor(parser, context, null);
     List<Row> results = pipeline.execute(rows);
     List<Row> errors = pipeline.errors();
     return new Pair<>(results, errors);
@@ -126,7 +132,7 @@ public final class TestingRig {
 
     String migrate = new MigrateToV2(recipe).migrate();
     RecipeParser parser = new GrammarBasedParser(Contexts.SYSTEM, migrate, registry);
-    return new RecipePipelineExecutor(parser, new TestingPipelineContext());
+    return new RecipePipelineExecutor(parser, new TestingPipelineContext(), null);
   }
 
   public static RecipeParser parse(String[] recipe) throws DirectiveParseException, DirectiveLoadException {

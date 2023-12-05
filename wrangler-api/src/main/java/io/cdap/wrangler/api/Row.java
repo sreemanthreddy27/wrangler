@@ -20,6 +20,7 @@ import io.cdap.wrangler.api.annotations.PublicEvolving;
 
 import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Objects;
 
@@ -31,10 +32,12 @@ public final class Row implements Serializable {
   private static final long serialVersionUID = -7505703059736709602L;
 
   // Name of the columns held by the row.
-  private List<String> columns = new ArrayList<>();
+  private List<String> columns = new ArrayList<>(); //add hashmap
 
   // Values held by the row.
   private List<Object> values = new ArrayList<>();
+
+  private HashMap<String, Object> rowMap = new HashMap<>();
 
   public Row() {
   }
@@ -47,6 +50,9 @@ public final class Row implements Serializable {
   public Row(Row row) {
     this.values = new ArrayList<>(row.values);
     this.columns = new ArrayList<>(row.columns);
+    for (int i = 0; i < row.width(); i++) {
+      rowMap.put(columns.get(i), values.get(i));
+    }
   }
 
   /**
@@ -116,6 +122,10 @@ public final class Row implements Serializable {
       }
     }
     return null;
+  }
+
+  public Object getValuefromColumn (String col) {
+    return rowMap.get(col);
   }
 
   /**

@@ -47,7 +47,8 @@ public interface RecipePipeline<I, O, E> extends Serializable, AutoCloseable {
    * @param input List of input record of type I.
    * @return Parsed output list of record of type I
    */
-  List<I> execute(List<I> input) throws RecipeException;
+  List<I> execute(List<I> input)
+      throws RecipeException, ErrorRowException, DirectiveExecutionException;
 
   /**
    * Returns records that are errored out.

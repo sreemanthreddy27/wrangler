@@ -105,7 +105,9 @@ public class JsParser implements Directive, Lineage {
       if (idx != -1) {
         Object value = row.getValue(idx);
         if (value == null) {
-          continue;
+//          continue;
+          //send to NULL handling layer.
+          //get the response and add it to result.
         }
 
         try {

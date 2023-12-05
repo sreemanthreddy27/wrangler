@@ -44,8 +44,10 @@ import io.cdap.cdap.proto.id.NamespaceId;
 import io.cdap.wrangler.PropertyIds;
 import io.cdap.wrangler.RequestExtractor;
 import io.cdap.wrangler.api.DirectiveConfig;
+import io.cdap.wrangler.api.DirectiveExecutionException;
 import io.cdap.wrangler.api.DirectiveLoadException;
 import io.cdap.wrangler.api.DirectiveParseException;
+import io.cdap.wrangler.api.ErrorRowException;
 import io.cdap.wrangler.api.GrammarMigrator;
 import io.cdap.wrangler.api.RecipeException;
 import io.cdap.wrangler.api.Row;
@@ -67,6 +69,7 @@ import io.cdap.wrangler.proto.workspace.v2.SampleSpec;
 import io.cdap.wrangler.proto.workspace.v2.ServiceResponse;
 import io.cdap.wrangler.proto.workspace.v2.StageSpec;
 import io.cdap.wrangler.proto.workspace.v2.Workspace;
+import io.cdap.wrangler.proto.workspace.v2.Workspace.UserDefinedAction;
 import io.cdap.wrangler.proto.workspace.v2.WorkspaceCreationRequest;
 import io.cdap.wrangler.proto.workspace.v2.WorkspaceDetail;
 import io.cdap.wrangler.proto.workspace.v2.WorkspaceId;
@@ -82,12 +85,15 @@ import io.cdap.wrangler.utils.RowHelper;
 import io.cdap.wrangler.utils.SchemaConverter;
 import io.cdap.wrangler.utils.StructuredToRowTransformer;
 import org.apache.commons.lang3.StringEscapeUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.net.HttpURLConnection;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -108,6 +114,7 @@ public class WorkspaceHandler extends AbstractDirectiveHandler {
 
   private static final Gson GSON =
     new GsonBuilder().registerTypeAdapter(Schema.class, new SchemaTypeAdapter()).create();
+  private static final Logger LOG = LoggerFactory.getLogger(WorkspaceHandler.class);
   private static final Pattern PRAGMA_PATTERN = Pattern.compile("^\\s*#pragma\\s+load-directives\\s+");
   private static final String UPLOAD_COUNT = "upload.file.count";
   private static final String CONNECTION_TYPE = "upload";
@@ -169,7 +176,8 @@ public class WorkspaceHandler extends AbstractDirectiveHandler {
       long now = System.currentTimeMillis();
       Workspace workspace = Workspace.builder(generateWorkspaceName(wsId, creationRequest.getSampleRequest().getPath()),
                                               wsId.getWorkspaceId())
-                              .setCreatedTimeMillis(now).setUpdatedTimeMillis(now).setSampleSpec(spec).build();
+                              .setCreatedTimeMillis(now).setUpdatedTimeMillis(now)
+          .setSampleSpec(spec).setColumnMappings(new HashMap<>()).build();
       wsStore.saveWorkspace(wsId, new WorkspaceDetail(workspace, rows));
       responder.sendJson(wsId.getWorkspaceId());
     });
@@ -355,11 +363,228 @@ public class WorkspaceHandler extends AbstractDirectiveHandler {
     respond(responder, namespace, ns -> {
       validateNamespace(ns, "Executing directives in system namespace is currently not supported");
 
+      DirectiveExecutionRequest directiveExecutionRequest =
+          GSON.fromJson(StandardCharsets.UTF_8.decode(request.getContent()).toString(),
+              DirectiveExecutionRequest.class);
+      Boolean useResult = true; //will be true or false depending on flag for null handling
+      if (directiveExecutionRequest.getColumnMappings() != null) {
+        useResult = true;
+      }
+
+      WorkspaceDetail detail = wsStore.getWorkspaceDetail(new WorkspaceId(ns, workspaceId));
+      SampleSpec spec = detail.getWorkspace().getSampleSpec();
+
+      List<Row> result = new ArrayList<>();
+      if (useResult) {
+//        List<String> columnNames = directiveExecutionRequest.getChangeNullabilityRequest().getColumnNames();
+//        UserDefinedAction userDefinedAction =
+//            directiveExecutionRequest.getChangeNullabilityRequest().getUserDefinedAction();
+        HashMap<String, UserDefinedAction> columnMappings = directiveExecutionRequest.
+            getColumnMappings() == null ?
+            new HashMap<>() : directiveExecutionRequest.getColumnMappings();
+        int minu = 0;
+
+        if (directiveExecutionRequest.getColumnMappings() == null) {
+          columnMappings.put("name", UserDefinedAction.NO_ACTION);
+          columnMappings.put("city", UserDefinedAction.NO_ACTION);
+          if (minu == 1) {
+//            columnMappings.put("latitude", UserDefinedAction.ERROR_PIPELINE);
+          }
+        }
+        //part 1 change nullability in schema field
+        changeNullability(columnMappings, ns, workspaceId);
+
+        //part 2 go through all the rows to check for null in non-nullable columns
+        result = nullChecker(detail.getSample(), columnMappings);
+      }
+
       DirectiveExecutionResponse response = execute(ns, request, new WorkspaceId(ns, workspaceId),
-                                                    null);
+          null, result , useResult);
       responder.sendJson(response);
     });
   }
+
+//  /**
+//   * To be called in case a column's nullability is changed also to be called .
+//   */
+//  @POST
+//  @TransactionPolicy(value = TransactionControl.EXPLICIT)
+//  @Path("v2/contexts/{context}/workspaces/{id}/initializeNullability")
+//  public void initializeNullability(HttpServiceRequest request, HttpServiceResponder responder,
+//      @PathParam("context") String namespace,
+//      @PathParam("id") String workspaceId) {
+//    respond(responder, namespace, ns -> {
+//      validateNamespace(ns, "Initializing column Nullability in system namespace is currently
+//      not supported");
+//      //part 1 initialize the nullability map.
+//      WorkspaceDetail detail = wsStore.getWorkspaceDetail(new WorkspaceId(ns, workspaceId));
+//      Schema currentSchema = TRANSIENT_STORE.get(TransientStoreKeys.OUTPUT_SCHEMA) != null ?
+//          TRANSIENT_STORE.get(TransientStoreKeys.OUTPUT_SCHEMA)
+//          : TRANSIENT_STORE.get(TransientStoreKeys.INPUT_SCHEMA);
+//      List<Row> result = null;
+//      if (currentSchema.getNullabilityMap().isEmpty()) {
+//        //initialize the nullability hash map
+//        HashMap<String, UserDefinedAction> nullability = new HashMap<>();
+//        // assuming all rows have the same columns
+//        Row samplerow = detail.getSample().get(0);
+//        for (int i=0; i < samplerow.length(); i++){
+//          nullability.put(samplerow.getColumn(i), UserDefinedAction.NULLABLE);
+//        }
+//        currentSchema.setNullabilityMap(nullability);
+//        TRANSIENT_STORE.set(TransientVariableScope.GLOBAL,
+//        TransientStoreKeys.INPUT_SCHEMA, currentSchema);
+//        //part 2 go through all the rows to check for null in non nullable columns
+//        result = nullChecker(detail.getSample(),nullability);
+//      }
+//      ChangeNullabilityResponse response = generateChangeNullabilityResponse(result, 1000);
+//      responder.sendJson(response);
+//    });
+//  }
+
+  public List<Row> nullChecker(List<Row> sample, HashMap<String, UserDefinedAction> columnMappings)
+      throws ErrorRowException, DirectiveExecutionException {
+    List<Row> result = new ArrayList<>();
+
+    for (Row row : sample) {
+      int elsecounts = 0;
+      boolean nullPresentinRow = false;
+
+      for (Map.Entry<String, UserDefinedAction> stringUserDefinedActionEntry : columnMappings.entrySet()) {
+        HashMap.Entry mapElement
+            = (HashMap.Entry) stringUserDefinedActionEntry;
+        String columnName = (String) mapElement.getKey();
+        UserDefinedAction userDefinedAction = (UserDefinedAction) mapElement.getValue();
+        Object value = row.getValue(columnName);
+        if (value == null) {
+          nullPresentinRow = true;
+          switch (userDefinedAction) {
+            case SKIP_ROW:
+              break;
+            case NULLABLE:
+              elsecounts++;
+              break;
+            case NO_ACTION:
+              elsecounts++;
+              break;
+            case ERROR_PIPELINE:
+              throw new DirectiveExecutionException(
+                  String.format("found null value in non nullable column %s", columnName));
+            case SEND_TO_ERROR_COLLECTOR:
+              break;
+          }
+        } else {
+          elsecounts++;
+        }
+      }
+      if (nullPresentinRow) {
+        if (elsecounts == columnMappings.size()) {
+          result.add(row);
+        }
+      } else {
+        result.add(row);
+      }
+    }
+    return result;
+  }
+
+//  protected ChangeNullabilityResponse generateChangeNullabilityResponse(
+//      List<Row> rows, int limit) throws Exception {
+//    List<Map<String, Object>> values = new ArrayList<>(rows.size());
+//    Map<String, String> types = new LinkedHashMap<>();
+////    SchemaConverter convertor = new SchemaConverter();
+//
+//    //schema management logic to be added
+//
+//    // Iterate through all the new rows.
+//    for (Row row : rows) {
+//      // If output array has more than return result values, we terminate.
+//      if (values.size() >= limit) {
+//        break;
+//      }
+//
+//      Map<String, Object> value = new HashMap<>(row.width());
+//
+//      // Iterate through all the fields of the row.
+//      for (Pair<String, Object> field : row.getFields()) {
+//        String fieldName = field.getFirst();
+//        Object object = field.getSecond();
+//
+//        if (object != null) {
+//          //schema management logic to be added
+//          if ((object instanceof Iterable)
+//              || (object instanceof Row)) {
+//            value.put(fieldName, GSON.toJson(object));
+//          } else {
+//            if ((object.getClass().getMethod("toString").getDeclaringClass() != Object.class)) {
+//              value.put(fieldName, object.toString());
+//            } else {
+//              value.put(fieldName, WranglerDisplaySerializer.NONDISPLAYABLE_STRING);
+//            }
+//          }
+//        } else {
+//          value.put(fieldName, null);
+//        }
+//      }
+//      values.add(value);
+//    }
+//    ChangeNullabilityResponse response =
+//        new ChangeNullabilityResponse(values, types.keySet(), types, getWorkspaceSummary(rows));
+//    return response;
+//  }
+
+//  @POST
+//  @TransactionPolicy(value = TransactionControl.EXPLICIT)
+//  @Path("v2/contexts/{context}/workspaces/{id}/changeNullability")
+//  public void changeNullability(HttpServiceRequest request, HttpServiceResponder responder,
+//      @PathParam("context") String namespace,
+//      @PathParam("id") String workspaceId) {
+//    respond(responder, namespace, ns -> {
+//      validateNamespace(ns, "Initializing column Nullability in system namespace is currently not supported");
+//      WorkspaceDetail detail = wsStore.getWorkspaceDetail(new WorkspaceId(ns, workspaceId));
+//      Schema currentSchema = TRANSIENT_STORE.get(TransientStoreKeys.OUTPUT_SCHEMA) != null ?
+//          TRANSIENT_STORE.get(TransientStoreKeys.OUTPUT_SCHEMA) :
+//          TRANSIENT_STORE.get(TransientStoreKeys.INPUT_SCHEMA);
+//      if (schemaManagementEnabled && currentSchema == null) {
+//        SampleSpec spec = detail.getWorkspace().getSampleSpec();
+//        // Workaround for uploaded files that don't have the spec set
+//        currentSchema = spec != null ? spec.getRelatedPlugins().iterator().next().getSchema() :
+//            Schema.recordOf("inputSchema", Schema.Field.of("body", Schema.of(Schema.Type.STRING)));
+//        TRANSIENT_STORE.reset(TransientVariableScope.GLOBAL);
+//        TRANSIENT_STORE.set(TransientVariableScope.GLOBAL,
+//        TransientStoreKeys.INPUT_SCHEMA, currentSchema); //MINU::set
+//      }
+////      Schema currentSchema = TRANSIENT_STORE.get(TransientStoreKeys.OUTPUT_SCHEMA) != null ?
+////          TRANSIENT_STORE.get(TransientStoreKeys.OUTPUT_SCHEMA) :
+////          TRANSIENT_STORE.get(TransientStoreKeys.INPUT_SCHEMA);
+//      ChangeNullabilityRequest changeNullabilityRequest =
+//          GSON.fromJson(StandardCharsets.UTF_8.decode(request.getContent()).toString(),
+//              ChangeNullabilityRequest.class);
+//      String columnName = changeNullabilityRequest.getColumnName();
+//      UserDefinedAction userDefinedAction1 = changeNullabilityRequest.getUserDefinedAction();
+//      UserDefinedAction userDefinedAction = UserDefinedAction.NO_ACTION;
+//      if (userDefinedAction1.equals("NO_ACTION")) {
+//       userDefinedAction = UserDefinedAction.NO_ACTION;
+//      } else if (userDefinedAction1.equals("SKIP_ROW")) {
+//        userDefinedAction = UserDefinedAction.SKIP_ROW;
+//      }
+//      List<Row> result = new ArrayList<>();
+//      //part 1 change nullability in schema field
+//      changeNullability(columnName, userDefinedAction,);
+//
+//      //part 2 go through all the rows to check for null in non-nullable columns
+//      result = nullChecker(detail.getSample(), userDefinedAction, columnName);
+//      ChangeNullabilityResponse response = generateChangeNullabilityResponse(result, 1000);
+//
+//      DirectiveExecutionRequest directiveExecutionRequest =
+//          GSON.fromJson(StandardCharsets.UTF_8.decode(request.getContent()).toString(),
+//              DirectiveExecutionRequest.class);
+//      if (directiveExecutionRequest.getDirectives().isEmpty()) {
+//              responder.sendJson(response);
+//      }
+//      execute(request, responder, namespace, workspaceId);
+//    });
+//
+//  }
 
   /**
    * Retrieve the directives available in the namespace
@@ -403,7 +628,7 @@ public class WorkspaceHandler extends AbstractDirectiveHandler {
       WorkspaceDetail detail = wsStore.getWorkspaceDetail(wsId);
       List<String> directives = new ArrayList<>(detail.getWorkspace().getDirectives());
       UserDirectivesCollector userDirectivesCollector = new UserDirectivesCollector();
-      List<Row> result = executeDirectives(ns.getName(), directives, detail, userDirectivesCollector);
+//      List<Row> result = executeDirectives(ns.getName(), directives, detail, userDirectivesCollector, null, false);
       userDirectivesCollector.addLoadDirectivesPragma(directives);
 
       Schema outputSchema;
@@ -411,16 +636,38 @@ public class WorkspaceHandler extends AbstractDirectiveHandler {
         outputSchema = TRANSIENT_STORE.get(TransientStoreKeys.OUTPUT_SCHEMA) != null ?
           TRANSIENT_STORE.get(TransientStoreKeys.OUTPUT_SCHEMA) : TRANSIENT_STORE.get(TransientStoreKeys.INPUT_SCHEMA);
       } else {
-        SchemaConverter schemaConvertor = new SchemaConverter();
-        outputSchema = result.isEmpty() ? null : schemaConvertor.toSchema("record", RowHelper.createMergedRow(result));
+        outputSchema = null;
       }
+//      else {
+//        SchemaConverter schemaConvertor = new SchemaConverter();
+//        outputSchema = result.isEmpty() ? null :
+//        schemaConvertor.toSchema("record", RowHelper.createMergedRow(result));
+//      }
+      List<String> nonNullableColumns = new ArrayList<>();
+      HashMap<String, UserDefinedAction> columnMappings = new HashMap<>();
+
+
+
+      if (!detail.getWorkspace().getColumnMappings().isEmpty()) {
+        columnMappings = new HashMap<>(detail.getWorkspace().getColumnMappings());
+      } else {
+        columnMappings = null;
+      }
+//      columnMappings.put("iata", UserDefinedAction.NO_ACTION);
+//      columnMappings.put("name", UserDefinedAction.SKIP_ROW);
+
+//      UserDefinedAction userDefinedAction = detail.getWorkspace().getUserDefinedAction();
+      String columnMappingsString = columnMappings != null ? columnMappings.toString() : "";
+      columnMappingsString = columnMappingsString.substring(1, columnMappingsString.length() - 1);
 
       // check if the rows are empty before going to create a record schema, it will result in a 400 if empty fields
       // are passed to a record type schema
       Map<String, String> properties = ImmutableMap.of("directives", String.join("\n", directives),
                                                        "field", "*",
                                                        "precondition", "false",
-                                                       "workspaceId", workspaceId);
+                                                       "workspaceId", workspaceId,
+          "columnMappings" , columnMappingsString
+      );
 
       Set<StageSpec> srcSpecs = getSourceSpecs(detail, directives);
 
@@ -447,7 +694,7 @@ public class WorkspaceHandler extends AbstractDirectiveHandler {
       Recipe recipe = recipeStore.getRecipeById(recipeId);
 
       DirectiveExecutionResponse response = execute(ns, request, new WorkspaceId(ns, workspaceId),
-                                                    recipe.getDirectives());
+                                                    recipe.getDirectives(), null, false);
       responder.sendJson(response);
     });
   }
@@ -460,7 +707,8 @@ public class WorkspaceHandler extends AbstractDirectiveHandler {
 
   private DirectiveExecutionResponse execute(NamespaceSummary ns, HttpServiceRequest request,
                                              WorkspaceId workspaceId,
-                                             List<String> recipeDirectives) throws Exception {
+                                             List<String> recipeDirectives,
+      List<Row> inputRows, Boolean useInputRows) throws Exception {
     DirectiveExecutionRequest executionRequest =
       GSON.fromJson(StandardCharsets.UTF_8.decode(request.getContent()).toString(),
                     DirectiveExecutionRequest.class);
@@ -472,8 +720,9 @@ public class WorkspaceHandler extends AbstractDirectiveHandler {
 
     WorkspaceDetail detail = wsStore.getWorkspaceDetail(workspaceId);
     UserDirectivesCollector userDirectivesCollector = new UserDirectivesCollector();
+
     List<Row> result = executeDirectives(ns.getName(), directives, detail,
-                                         userDirectivesCollector);
+                                         userDirectivesCollector, inputRows, useInputRows);
     DirectiveExecutionResponse response = generateExecutionResponse(result,
                                                                     executionRequest.getLimit());
     userDirectivesCollector.addLoadDirectivesPragma(directives);
@@ -483,6 +732,24 @@ public class WorkspaceHandler extends AbstractDirectiveHandler {
     wsStore.updateWorkspace(workspaceId, newWorkspace);
     return response;
   }
+
+  private void changeNullability(HashMap<String, UserDefinedAction> columnMappings,
+      NamespaceSummary ns, String workspaceId) throws Exception {
+    try {
+      WorkspaceDetail detail = wsStore.getWorkspaceDetail(new WorkspaceId(ns, workspaceId));
+      Workspace workspace = wsStore.getWorkspace(new WorkspaceId(ns, workspaceId));
+// Create a Set and pass List object as parameter
+//      HashSet<String> nonNullableColumns = new HashSet<String>(columnNames);
+//      nonNullableColumns.addAll(columnNames);
+//      workspace.setUserDefinedAction(userDefinedAction);
+//      workspace.setNonNullableColumns(new HashSet<String>(columnNames));
+      workspace.setColumnMappings(columnMappings);
+      wsStore.updateWorkspace(new WorkspaceId(ns, workspaceId), workspace);
+    } catch (Exception e) {
+      throw new RuntimeException("Error in setting nullability of the column ", e);
+    }
+    }
+
 
   /**
    * Get source specs, contains some hacky way on dealing with the csv parser
@@ -497,6 +764,19 @@ public class WorkspaceHandler extends AbstractDirectiveHandler {
       directives.stream()
         .map(String::trim)
         .anyMatch(directive -> directive.startsWith("parse-as-csv") && directive.endsWith("true"));
+
+//    List<String> nonNullableColumns = new ArrayList<>();
+//    if (detail.getWorkspace().getNonNullableColumns() != null) {
+//      nonNullableColumns.addAll(detail.getWorkspace().getNonNullableColumns());
+//    } else {
+//      nonNullableColumns = null;
+//    }
+//
+//    UserDefinedAction userDefinedAction = detail.getWorkspace().getUserDefinedAction();
+//    String nonNullableColumnsString = nonNullableColumns != null ? String.join("\n", nonNullableColumns) : "latitude";
+
+
+
     if (shouldCopyHeader && !srcSpecs.isEmpty()) {
       srcSpecs = srcSpecs.stream().map(stageSpec -> {
         Plugin plugin = stageSpec.getPlugin();
@@ -545,7 +825,8 @@ public class WorkspaceHandler extends AbstractDirectiveHandler {
   private <E extends Exception> List<Row> executeDirectives(String namespace,
                                                             List<String> directives,
                                                             WorkspaceDetail detail,
-                                                            GrammarWalker.Visitor<E> grammarVisitor) throws Exception {
+                                                            GrammarWalker.Visitor<E> grammarVisitor,
+      List<Row> inputRows, Boolean useInputRows) throws Exception {
     // Remove all the #pragma from the existing directives. New ones will be generated.
     directives.removeIf(d -> PRAGMA_PATTERN.matcher(d).find());
 
@@ -560,7 +841,7 @@ public class WorkspaceHandler extends AbstractDirectiveHandler {
 
     return getContext().isRemoteTaskEnabled() ?
       executeRemotely(namespace, directives, detail, grammarVisitor) :
-      executeLocally(namespace, directives, detail, grammarVisitor);
+      executeLocally(namespace, directives, detail, grammarVisitor, inputRows, useInputRows);
   }
 
   /**
@@ -574,13 +855,19 @@ public class WorkspaceHandler extends AbstractDirectiveHandler {
    * @return the resulting rows after applying the directives
    */
   private <E extends Exception> List<Row> executeLocally(String namespace, List<String> directives,
-                                   WorkspaceDetail detail, GrammarWalker.Visitor<E> grammarVisitor)
-    throws DirectiveLoadException, DirectiveParseException, E, RecipeException {
+                                   WorkspaceDetail detail, GrammarWalker.Visitor<E> grammarVisitor,
+      List<Row> inputRows, Boolean useInputRows)
+      throws DirectiveLoadException, DirectiveParseException, E,
+      RecipeException, ErrorRowException, DirectiveExecutionException {
 
     // load the udd
     composite.reload(namespace);
+    if (useInputRows) {
+      return executeDirectives(namespace, directives, inputRows,
+          grammarVisitor, detail.getWorkspace().getColumnMappings());
+    }
     return executeDirectives(namespace, directives, new ArrayList<>(detail.getSample()),
-                             grammarVisitor);
+                             grammarVisitor, detail.getWorkspace().getColumnMappings());
   }
 
   /**

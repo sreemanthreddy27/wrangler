@@ -20,6 +20,8 @@ package io.cdap.wrangler.proto.workspace.v2;
 import com.google.gson.JsonObject;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import javax.annotation.Nullable;
@@ -38,9 +40,15 @@ public class Workspace {
   // this is for insights page in UI
   private final JsonObject insights;
 
+//  private UserDefinedAction userDefinedAction;
+//
+//  private HashSet<String> nonNullableColumns;
+
+  private HashMap<String, UserDefinedAction> columnMappings;
+
   private Workspace(String workspaceName, String workspaceId, List<String> directives,
                     long createdTimeMillis, long updatedTimeMillis, @Nullable SampleSpec sampleSpec,
-                    JsonObject insights) {
+                    JsonObject insights, HashMap<String, UserDefinedAction> columnMappings) {
     this.workspaceName = workspaceName;
     this.workspaceId = workspaceId;
     this.directives = directives;
@@ -48,6 +56,8 @@ public class Workspace {
     this.updatedTimeMillis = updatedTimeMillis;
     this.sampleSpec = sampleSpec;
     this.insights = insights;
+    this.columnMappings = columnMappings == null || columnMappings.isEmpty() ?
+        new HashMap<>() : columnMappings;
   }
 
   public String getWorkspaceName() {
@@ -78,6 +88,32 @@ public class Workspace {
   public JsonObject getInsights() {
     return insights;
   }
+
+//  public HashSet<String> getNonNullableColumns() {
+//    return nonNullableColumns;
+//  }
+//
+//  public UserDefinedAction getUserDefinedAction() {
+//    return userDefinedAction;
+//  }
+
+
+  public HashMap<String, UserDefinedAction> getColumnMappings() {
+    return columnMappings;
+  }
+
+  public void setColumnMappings(
+      HashMap<String, UserDefinedAction> columnMappings) {
+    this.columnMappings = columnMappings;
+  }
+
+//  public void setNonNullableColumns(HashSet<String> nonNullableColumns) {
+//    this.nonNullableColumns = nonNullableColumns;
+//  }
+//
+//  public void setUserDefinedAction(UserDefinedAction userDefinedAction) {
+//    this.userDefinedAction = userDefinedAction;
+//  }
 
   @Override
   public boolean equals(Object o) {
@@ -111,7 +147,8 @@ public class Workspace {
              .setCreatedTimeMillis(existing.getCreatedTimeMillis())
              .setUpdatedTimeMillis(existing.getUpdatedTimeMillis())
              .setSampleSpec(existing.getSampleSpec())
-             .setInsights(existing.getInsights());
+             .setInsights(existing.getInsights())
+             .setColumnMappings(existing.getColumnMappings());
   }
 
   /**
@@ -125,6 +162,7 @@ public class Workspace {
     private long updatedTimeMillis;
     private SampleSpec sampleSpec;
     private JsonObject insights;
+    private HashMap<String, UserDefinedAction> columnMappings;
 
     Builder(String name, String workspaceId) {
       this.workspaceName = name;
@@ -159,9 +197,25 @@ public class Workspace {
       return this;
     }
 
+    public Builder setColumnMappings (HashMap<String, UserDefinedAction> columnMappings) {
+      this.columnMappings = columnMappings;
+      return this;
+    }
+
     public Workspace build() {
       return new Workspace(workspaceName, workspaceId, directives, createdTimeMillis, updatedTimeMillis, sampleSpec,
-                           insights);
+                           insights, columnMappings);
     }
+  }
+
+  /**
+   * UserDefinedAction enum.
+   */
+  public enum UserDefinedAction {
+    NO_ACTION,
+    SKIP_ROW,
+    SEND_TO_ERROR_COLLECTOR,
+    ERROR_PIPELINE,
+    NULLABLE
   }
 }
